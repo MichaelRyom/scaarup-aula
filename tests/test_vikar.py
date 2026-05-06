@@ -3,6 +3,7 @@ import datetime
 import pytest
 
 from custom_components.aula.client import (
+    Client,
     aggregate_vikar_payload,
     school_year_start,
 )
@@ -89,6 +90,35 @@ def test_aggregate_empty_payload():
     assert aggregate_vikar_payload({}, 1) == {}
     assert aggregate_vikar_payload({"data": []}, 1) == {}
     assert aggregate_vikar_payload({"data": None}, 1) == {}
+
+
+def test_month_chunks_single_month():
+    chunks = list(
+        Client._month_chunks(datetime.date(2025, 8, 5), datetime.date(2025, 8, 20))
+    )
+    assert chunks == [(datetime.date(2025, 8, 1), datetime.date(2025, 8, 31))]
+
+
+def test_month_chunks_spans_multiple_months():
+    chunks = list(
+        Client._month_chunks(datetime.date(2025, 8, 1), datetime.date(2025, 10, 31))
+    )
+    assert chunks == [
+        (datetime.date(2025, 8, 1), datetime.date(2025, 8, 31)),
+        (datetime.date(2025, 9, 1), datetime.date(2025, 9, 30)),
+        (datetime.date(2025, 10, 1), datetime.date(2025, 10, 31)),
+    ]
+
+
+def test_month_chunks_crosses_year_boundary():
+    chunks = list(
+        Client._month_chunks(datetime.date(2025, 12, 1), datetime.date(2026, 2, 28))
+    )
+    assert chunks == [
+        (datetime.date(2025, 12, 1), datetime.date(2025, 12, 31)),
+        (datetime.date(2026, 1, 1), datetime.date(2026, 1, 31)),
+        (datetime.date(2026, 2, 1), datetime.date(2026, 2, 28)),
+    ]
 
 
 def test_aggregate_skips_lesson_without_date():

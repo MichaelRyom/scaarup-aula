@@ -524,18 +524,26 @@ class Client:
         except Exception as e:
             _LOGGER.warning("Could not write vikar storage at %s: %s", path, e)
 
-    def _fetch_calendar_range(self, child_id, start_date, end_date):
+    def _fetch_calendar_for_children(self, child_ids, start_date, end_date):
+        """Fetch calendar payload for all children in one call.
+
+        Mirrors the body format used by the existing 14-day skoleskema fetch
+        below — comma-joined ids, ``%z`` offset (``+0000`` in UTC) — so we
+        share the same proven request shape and avoid Aula's per-child 403.
+        """
+        inst_profile_ids = ",".join(str(cid) for cid in child_ids)
         csrf_token = self._get_csrf_token()
         headers = {"content-type": "application/json"}
         if csrf_token:
             headers["csrfp-token"] = csrf_token
-        body = json.dumps(
-            {
-                "instProfileIds": [int(child_id)],
-                "resourceIds": [],
-                "start": start_date.strftime("%Y-%m-%d 00:00:00.0000+01:00"),
-                "end": end_date.strftime("%Y-%m-%d 23:59:59.9990+01:00"),
-            }
+        body = (
+            '{"instProfileIds":['
+            + inst_profile_ids
+            + '],"resourceIds":[],"start":"'
+            + start_date.strftime("%Y-%m-%d 00:00:00.0000+0000")
+            + '","end":"'
+            + end_date.strftime("%Y-%m-%d 23:59:59.9990+0000")
+            + '"}'
         )
         res = self._session.post(
             self.apiurl
@@ -545,11 +553,29 @@ class Client:
             headers=headers,
             verify=True,
         )
+        if not res.ok:
+            _LOGGER.warning(
+                "Vikar fetch HTTP %s for %s..%s: %s",
+                res.status_code,
+                start_date,
+                end_date,
+                (res.text or "")[:500],
+            )
         res.raise_for_status()
         return res.json()
 
+    @staticmethod
+    def _month_chunks(start_date, end_date):
+        """Yield (first_day, last_day) tuples for each month in [start, end]."""
+        cursor = start_date.replace(day=1)
+        while cursor <= end_date:
+            next_month = (cursor + datetime.timedelta(days=32)).replace(day=1)
+            last_day = next_month - datetime.timedelta(days=1)
+            yield cursor, last_day
+            cursor = next_month
+
     def fetch_vikar_data(self, force_backfill=False, today=None):
-        """Refresh per-month vikar counts. Throttled to 6h between full passes."""
+        """Refresh per-month vikar counts. Throttled to 6h between successful passes."""
         if not hasattr(self, "vikar_data"):
             self._load_vikar_data()
 
@@ -585,27 +611,42 @@ class Client:
         ).replace(day=1) - datetime.timedelta(days=1)
         fetch_end = last_day_of_month
 
-        for child in self._children:
+        any_success = False
+        for chunk_start, chunk_end in self._month_chunks(fetch_start, fetch_end):
             try:
-                payload = self._fetch_calendar_range(child["id"], fetch_start, fetch_end)
+                payload = self._fetch_calendar_for_children(
+                    self._childids, chunk_start, chunk_end
+                )
             except Exception as e:
                 _LOGGER.warning(
-                    "Could not fetch vikar data for child %s: %s", child["id"], e
+                    "Could not fetch vikar data for %s..%s: %s",
+                    chunk_start,
+                    chunk_end,
+                    e,
                 )
                 continue
-            new_months = aggregate_vikar_payload(payload, child["id"])
-            child_key = str(child["id"])
-            entry = self.vikar_data["children"].setdefault(
-                child_key, {"monthly": {}}
-            )
-            entry["name"] = child["name"]
-            for ym, counts in new_months.items():
-                entry["monthly"][ym] = counts
+            for child in self._children:
+                new_months = aggregate_vikar_payload(payload, child["id"])
+                if not new_months:
+                    continue
+                child_key = str(child["id"])
+                entry = self.vikar_data["children"].setdefault(
+                    child_key, {"monthly": {}}
+                )
+                entry["name"] = child["name"]
+                for ym, counts in new_months.items():
+                    entry["monthly"][ym] = counts
+            any_success = True
 
-        self.vikar_data["last_fetch"] = datetime.datetime.now().isoformat(
-            timespec="seconds"
-        )
-        self._save_vikar_data()
+        if any_success:
+            self.vikar_data["last_fetch"] = datetime.datetime.now().isoformat(
+                timespec="seconds"
+            )
+            self._save_vikar_data()
+        else:
+            _LOGGER.warning(
+                "Vikar fetch yielded no successful responses; last_fetch not updated"
+            )
 
     def update_data(self):
         # Ensure valid token before making API calls
