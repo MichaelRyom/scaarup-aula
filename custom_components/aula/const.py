@@ -16,7 +16,8 @@ https://github.com/scaarup/aula/issues
 
 DOMAIN = "aula"
 API = "https://www.aula.dk/api/v"
-API_VERSION = "22"
+API_VERSION = "23"
+VIKAR_STORAGE_FILE = "aula_vikar.json"
 MIN_UDDANNELSE_API = "https://api.minuddannelse.net/aula"
 MEEBOOK_API = "https://app.meebook.com/aulaapi"
 SYSTEMATIC_API = "https://systematic-momo.dk/api/aula"

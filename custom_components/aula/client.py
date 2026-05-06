@@ -13,12 +13,48 @@ from .const import (
     MEEBOOK_API,
     SYSTEMATIC_API,
     EASYIQ_API,
+    VIKAR_STORAGE_FILE,
 )
+import os
 from homeassistant.exceptions import ConfigEntryNotReady, ConfigEntryAuthFailed
 from .aula_login_client.client import AulaLoginClient
 from .aula_login_client.exceptions import AulaAuthenticationError
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def school_year_start(today=None):
+    """Return the August 1st marking the start of the current school year."""
+    today = today or datetime.date.today()
+    if today.month >= 8:
+        return datetime.date(today.year, 8, 1)
+    return datetime.date(today.year - 1, 8, 1)
+
+
+def aggregate_vikar_payload(payload, child_id):
+    """Group lessons in an Aula calendar response by YYYY-MM and count totals.
+
+    Counts a lesson as a substitute lesson when ``lesson.lessonStatus == 'substitute'``.
+    Returns ``{"YYYY-MM": {"lessons": int, "substitute": int}}``.
+    """
+    months = {}
+    for c in (payload or {}).get("data") or []:
+        if c.get("type") != "lesson":
+            continue
+        belongs = c.get("belongsToProfiles") or []
+        if belongs and int(belongs[0]) != int(child_id):
+            continue
+        date_str = (c.get("startDateTime") or "")[:10]
+        if not date_str:
+            continue
+        ym = date_str[:7]
+        lesson = c.get("lesson") or {}
+        status = lesson.get("lessonStatus")
+        bucket = months.setdefault(ym, {"lessons": 0, "substitute": 0})
+        bucket["lessons"] += 1
+        if status == "substitute":
+            bucket["substitute"] += 1
+    return months
 
 
 class Client:
@@ -455,6 +491,122 @@ class Client:
 
     ###
 
+    # ------------------------------------------------------------------
+    # Vikar tracking: persists per-month substitute lesson counts so we
+    # have history beyond the current school year shown by Aula.
+    # ------------------------------------------------------------------
+    def _vikar_storage_path(self):
+        if self._hass is not None:
+            return self._hass.config.path(VIKAR_STORAGE_FILE)
+        return VIKAR_STORAGE_FILE
+
+    def _load_vikar_data(self):
+        path = self._vikar_storage_path()
+        if not os.path.exists(path):
+            self.vikar_data = {"version": 1, "children": {}, "last_fetch": None}
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                self.vikar_data = json.load(f)
+        except Exception as e:
+            _LOGGER.warning("Could not load vikar storage at %s: %s", path, e)
+            self.vikar_data = {"version": 1, "children": {}, "last_fetch": None}
+            return
+        self.vikar_data.setdefault("version", 1)
+        self.vikar_data.setdefault("children", {})
+        self.vikar_data.setdefault("last_fetch", None)
+
+    def _save_vikar_data(self):
+        path = self._vikar_storage_path()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.vikar_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            _LOGGER.warning("Could not write vikar storage at %s: %s", path, e)
+
+    def _fetch_calendar_range(self, child_id, start_date, end_date):
+        csrf_token = self._get_csrf_token()
+        headers = {"content-type": "application/json"}
+        if csrf_token:
+            headers["csrfp-token"] = csrf_token
+        body = json.dumps(
+            {
+                "instProfileIds": [int(child_id)],
+                "resourceIds": [],
+                "start": start_date.strftime("%Y-%m-%d 00:00:00.0000+01:00"),
+                "end": end_date.strftime("%Y-%m-%d 23:59:59.9990+01:00"),
+            }
+        )
+        res = self._session.post(
+            self.apiurl
+            + "?method=calendar.getEventsByProfileIdsAndResourceIds"
+            + self._get_access_token_param(),
+            data=body,
+            headers=headers,
+            verify=True,
+        )
+        res.raise_for_status()
+        return res.json()
+
+    def fetch_vikar_data(self, force_backfill=False, today=None):
+        """Refresh per-month vikar counts. Throttled to 6h between full passes."""
+        if not hasattr(self, "vikar_data"):
+            self._load_vikar_data()
+
+        today = today or datetime.date.today()
+        last_fetch_dt = None
+        last_fetch = self.vikar_data.get("last_fetch")
+        if last_fetch:
+            try:
+                last_fetch_dt = datetime.datetime.fromisoformat(last_fetch)
+            except (TypeError, ValueError):
+                last_fetch_dt = None
+
+        if (
+            not force_backfill
+            and last_fetch_dt
+            and self.vikar_data.get("children")
+            and (datetime.datetime.now() - last_fetch_dt) < datetime.timedelta(hours=6)
+        ):
+            _LOGGER.debug("Skipping vikar fetch — last fetch was %s", last_fetch_dt)
+            return
+
+        sy_start = school_year_start(today)
+        if force_backfill or not self.vikar_data.get("children"):
+            fetch_start = sy_start
+            _LOGGER.info("Vikar backfill from %s to %s", fetch_start, today)
+        else:
+            fetch_start = max(sy_start, today - datetime.timedelta(days=60))
+            _LOGGER.debug("Vikar incremental from %s to %s", fetch_start, today)
+
+        fetch_start = fetch_start.replace(day=1)
+        last_day_of_month = (
+            today.replace(day=1) + datetime.timedelta(days=32)
+        ).replace(day=1) - datetime.timedelta(days=1)
+        fetch_end = last_day_of_month
+
+        for child in self._children:
+            try:
+                payload = self._fetch_calendar_range(child["id"], fetch_start, fetch_end)
+            except Exception as e:
+                _LOGGER.warning(
+                    "Could not fetch vikar data for child %s: %s", child["id"], e
+                )
+                continue
+            new_months = aggregate_vikar_payload(payload, child["id"])
+            child_key = str(child["id"])
+            entry = self.vikar_data["children"].setdefault(
+                child_key, {"monthly": {}}
+            )
+            entry["name"] = child["name"]
+            for ym, counts in new_months.items():
+                entry["monthly"][ym] = counts
+
+        self.vikar_data["last_fetch"] = datetime.datetime.now().isoformat(
+            timespec="seconds"
+        )
+        self._save_vikar_data()
+
     def update_data(self):
         # Ensure valid token before making API calls
         self._ensure_valid_token()
@@ -634,6 +786,12 @@ class Client:
                     "Got the following reply when trying to fetch calendars: "
                     + str(res.text)
                 )
+
+            # Vikar tracking — fetches longer history and persists per-month counts
+            try:
+                self.fetch_vikar_data()
+            except Exception as e:
+                _LOGGER.warning("Vikar tracking update failed: %s", e)
         # End of calendar
         # MU Opgaver:
         if self._mu_opgaver is True:

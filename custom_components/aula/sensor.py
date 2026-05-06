@@ -92,6 +92,9 @@ async def async_setup_entry(
                 entities.append(AulaSensor(hass, coordinator, child))
         else:
             entities.append(AulaSensor(hass, coordinator, child))
+
+        if config[CONF_SCHOOLSCHEDULE]:
+            entities.append(AulaVikarSensor(hass, coordinator, child))
     # We have data and can now set up the calendar platform:
     if config[CONF_SCHOOLSCHEDULE]:
         hass.async_create_task(
@@ -288,6 +291,105 @@ class AulaSensor(Entity):
 
     async def async_added_to_hass(self):
         """When entity is added to hass."""
+        self.async_on_remove(
+            self._coordinator.async_add_listener(self.async_write_ha_state)
+        )
+
+
+class AulaVikarSensor(Entity):
+    """Per-child sensor exposing accumulated substitute lesson counts."""
+
+    def __init__(self, hass, coordinator, child):
+        self._hass = hass
+        self._coordinator = coordinator
+        self._child = child
+        self._client = hass.data[DOMAIN]["client"]
+
+    def _child_data(self):
+        vikar_data = getattr(self._client, "vikar_data", None) or {}
+        return vikar_data.get("children", {}).get(str(self._child["id"]), {})
+
+    def _monthly(self):
+        return self._child_data().get("monthly", {}) or {}
+
+    @property
+    def name(self):
+        first_name = self._client._childnames[self._child["id"]].split()[0]
+        institution = self._client._institutions[self._child["id"]]
+        return f"{institution} {first_name} vikartimer"
+
+    @property
+    def unique_id(self):
+        return f"aula_vikar_{self._child['id']}"
+
+    @property
+    def icon(self):
+        return "mdi:account-switch"
+
+    @property
+    def state_class(self):
+        return "total"
+
+    @property
+    def native_unit_of_measurement(self):
+        return "lektioner"
+
+    @property
+    def state(self):
+        return sum(m.get("substitute", 0) for m in self._monthly().values())
+
+    @property
+    def extra_state_attributes(self):
+        monthly = self._monthly()
+        total_lessons = sum(m.get("lessons", 0) for m in monthly.values())
+        total_substitute = sum(m.get("substitute", 0) for m in monthly.values())
+        pct = (
+            round(total_substitute / total_lessons * 100, 2)
+            if total_lessons
+            else 0
+        )
+
+        ym_now = datetime.now().strftime("%Y-%m")
+        current = monthly.get(ym_now, {"lessons": 0, "substitute": 0})
+
+        monthly_sorted = dict(sorted(monthly.items()))
+        rows = []
+        for ym in sorted(monthly.keys()):
+            m = monthly[ym]
+            l = m.get("lessons", 0)
+            s = m.get("substitute", 0)
+            rows.append(
+                {
+                    "month": ym,
+                    "lessons": l,
+                    "substitute": s,
+                    "pct": round(s / l * 100, 1) if l else 0,
+                }
+            )
+
+        return {
+            "child": self._child["name"],
+            "total_lessons": total_lessons,
+            "total_substitute": total_substitute,
+            "pct_substitute": pct,
+            "current_month_lessons": current.get("lessons", 0),
+            "current_month_substitute": current.get("substitute", 0),
+            "monthly": monthly_sorted,
+            "monthly_rows": rows,
+        }
+
+    @property
+    def should_poll(self):
+        return False
+
+    @property
+    def available(self):
+        return self._coordinator.last_update_success
+
+    async def async_update(self):
+        await self._coordinator.async_request_refresh()
+
+    async def async_added_to_hass(self):
         self.async_on_remove(
             self._coordinator.async_add_listener(self.async_write_ha_state)
         )

@@ -58,6 +58,21 @@ cards:
 
    ![image](https://user-images.githubusercontent.com/8055470/199254249-3bf441bc-7dce-4f5d-a809-d119d20a7b2b.png)
 
+- Vikar-statistik (substitute lessons): for hvert barn oprettes en ekstra sensor, `sensor.<institution>_<navn>_vikartimer`, der tæller vikartimer pr. måned og persisterer historikken på disk (`<config>/aula_vikar.json`). Ved første kørsel laves backfill fra 1. august i indeværende skoleår. Renderes pænt med markdown-card:
+
+  ```yaml
+  type: markdown
+  title: Vikartimer
+  content: |
+    **{{ state_attr('sensor.hojelse_skole_emilie_vikartimer', 'child') }}** — i alt {{ states('sensor.hojelse_skole_emilie_vikartimer') }} vikartimer ({{ state_attr('sensor.hojelse_skole_emilie_vikartimer', 'pct_substitute') }}% af {{ state_attr('sensor.hojelse_skole_emilie_vikartimer', 'total_lessons') }} lektioner)
+
+    | Måned | Lektioner | Vikar | % |
+    |---|---:|---:|---:|
+    {% for r in state_attr('sensor.hojelse_skole_emilie_vikartimer', 'monthly_rows') -%}
+    | {{ r.month }} | {{ r.lessons }} | {{ r.substitute }} | {{ r.pct }} |
+    {% endfor %}
+  ```
+
 - Lots of small fixes and optimizations
 
 ## Installation
