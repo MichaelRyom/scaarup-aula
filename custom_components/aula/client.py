@@ -35,7 +35,12 @@ def aggregate_vikar_payload(payload, child_id):
     """Group lessons in an Aula calendar response by YYYY-MM and count totals.
 
     Counts a lesson as a substitute lesson when ``lesson.lessonStatus == 'substitute'``.
-    Returns ``{"YYYY-MM": {"lessons": int, "substitute": int}}``.
+    Returns a dict keyed by YYYY-MM, each value containing:
+      - ``lessons``: total lesson count
+      - ``substitute``: count of substitute lessons
+      - ``subjects``: ``{title: {"lessons": int, "substitute": int}}``
+      - ``teachers``: ``{teacherName: {"lessons": int, "substitute": int}}``
+        (primary teacher only, i.e. ``participantRole == "primaryTeacher"``)
     """
     months = {}
     for c in (payload or {}).get("data") or []:
@@ -50,10 +55,38 @@ def aggregate_vikar_payload(payload, child_id):
         ym = date_str[:7]
         lesson = c.get("lesson") or {}
         status = lesson.get("lessonStatus")
-        bucket = months.setdefault(ym, {"lessons": 0, "substitute": 0})
+        is_sub = status == "substitute"
+
+        bucket = months.setdefault(
+            ym, {"lessons": 0, "substitute": 0, "subjects": {}, "teachers": {}}
+        )
         bucket["lessons"] += 1
-        if status == "substitute":
+        if is_sub:
             bucket["substitute"] += 1
+
+        # Track by subject (fag) — use the lesson title
+        subject = (c.get("title") or "").strip()
+        if subject:
+            sbkt = bucket["subjects"].setdefault(
+                subject, {"lessons": 0, "substitute": 0}
+            )
+            sbkt["lessons"] += 1
+            if is_sub:
+                sbkt["substitute"] += 1
+
+        # Track by primary teacher (lærer)
+        for p in lesson.get("participants") or []:
+            if p.get("participantRole") == "primaryTeacher":
+                teacher = (p.get("teacherName") or "").strip()
+                if teacher:
+                    tbkt = bucket["teachers"].setdefault(
+                        teacher, {"lessons": 0, "substitute": 0}
+                    )
+                    tbkt["lessons"] += 1
+                    if is_sub:
+                        tbkt["substitute"] += 1
+                break
+
     return months
 
 

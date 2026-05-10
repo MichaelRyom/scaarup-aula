@@ -367,6 +367,50 @@ class AulaVikarSensor(Entity):
                 }
             )
 
+        # Aggregate teachers across all months
+        teachers = {}
+        for m in monthly.values():
+            for teacher, tcounts in (m.get("teachers") or {}).items():
+                t = teachers.setdefault(teacher, {"lessons": 0, "substitute": 0})
+                t["lessons"] += tcounts.get("lessons", 0)
+                t["substitute"] += tcounts.get("substitute", 0)
+        teacher_rows = sorted(
+            [
+                {
+                    "teacher": t,
+                    "lessons": v["lessons"],
+                    "substitute": v["substitute"],
+                    "pct": round(v["substitute"] / v["lessons"] * 100, 1)
+                    if v["lessons"]
+                    else 0,
+                }
+                for t, v in teachers.items()
+            ],
+            key=lambda x: (-x["substitute"], x["teacher"]),
+        )
+
+        # Aggregate subjects across all months
+        subjects = {}
+        for m in monthly.values():
+            for subject, scounts in (m.get("subjects") or {}).items():
+                s = subjects.setdefault(subject, {"lessons": 0, "substitute": 0})
+                s["lessons"] += scounts.get("lessons", 0)
+                s["substitute"] += scounts.get("substitute", 0)
+        subject_rows = sorted(
+            [
+                {
+                    "subject": subj,
+                    "lessons": v["lessons"],
+                    "substitute": v["substitute"],
+                    "pct": round(v["substitute"] / v["lessons"] * 100, 1)
+                    if v["lessons"]
+                    else 0,
+                }
+                for subj, v in subjects.items()
+            ],
+            key=lambda x: (-x["substitute"], x["subject"]),
+        )
+
         return {
             "child": self._child["name"],
             "total_lessons": total_lessons,
@@ -376,6 +420,8 @@ class AulaVikarSensor(Entity):
             "current_month_substitute": current.get("substitute", 0),
             "monthly": monthly_sorted,
             "monthly_rows": rows,
+            "teacher_rows": teacher_rows,
+            "subject_rows": subject_rows,
         }
 
     @property
